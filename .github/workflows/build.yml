@@ -1,0 +1,86 @@
+name: build-release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "اسم الـ tag (مثلًا v0.1.0)"
+        required: true
+        default: "v0.1.0"
+      tba_ref:
+        description: "commit من tdlib/telegram-bot-api (سيبه فاضي للافتراضي المثبّت)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    steps:
+      # actions مثبّتة بـ commit SHA (v4.4.0 / v4.6.2)
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Build bot.zip
+        run: |
+          set -euo pipefail
+          echo "${TAG#v}" > VERSION
+          zip -r bot.zip . -x ".git/*" ".github/*" "tests/*" "*__pycache__*" "*.pyc" ".gitignore"
+          sha256sum bot.zip > bot.zip.sha256
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: package
+          path: bot.zip*
+
+  binary:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]   # الـ notebook بيختار حسب lsb_release بتاع Colab
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Build telegram-bot-api
+        env:
+          TBA_REF: ${{ github.event.inputs.tba_ref }}
+        run: |
+          set -euo pipefail
+          [ -z "$TBA_REF" ] && unset TBA_REF
+          bash scripts/build_binary.sh out
+      - name: Name and checksum
+        run: |
+          set -euo pipefail
+          V="${{ matrix.os }}"; V="${V#ubuntu-}"
+          cp out/telegram-bot-api "telegram-bot-api-ubuntu-${V}"
+          sha256sum "telegram-bot-api-ubuntu-${V}" > "telegram-bot-api-ubuntu-${V}.sha256"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: binary-${{ matrix.os }}
+          path: telegram-bot-api-ubuntu-*
+
+  release:
+    needs: [package, binary]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd dist && ls -la
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" ./* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            TARGET=""
+            [ "${{ github.event_name }}" = "workflow_dispatch" ] && TARGET="--target $GITHUB_SHA"
+            gh release create "$TAG" ./* --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes $TARGET
+          fi
